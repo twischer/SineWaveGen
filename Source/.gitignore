@@ -3,3 +3,6 @@
 *.lst
 *.map
 /.dep/
+*.eep
+*.lss
+*.sym

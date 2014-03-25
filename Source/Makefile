@@ -33,7 +33,7 @@
 
 
 # MCU name
-MCU = atmega32
+MCU = atmega8515
 
 # Output format. (can be srec, ihex, binary)
 FORMAT = ihex
@@ -43,7 +43,7 @@ TARGET = main
 
 
 # List C source files here. (C dependencies are automatically generated.)
-SRC = $(TARGET).c UART.c
+SRC = $(TARGET).c
 
 
 # List Assembler source files here.
