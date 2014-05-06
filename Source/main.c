@@ -33,33 +33,37 @@ ISR(TIMER1_OVF_vect)
 	static uint8_t sineTableIndex = 0;
 	sineTableIndex++;
 	
-	static bool higherHalfWave = true;
+	static bool positiveHalfWave = true;
 	
-	if ( sineTableIndex >= (sizeof(SINE_TABLE) - 1) )
+	if (sineTableIndex >= sizeof(SINE_TABLE))
 	{
-		// disable all mosfets for one cycle
-		// so not both mosfets of one half bridge can be enabled
-		NEG_WAVE_OCR = 0x00;
-		POS_WAVE_OCR = 0x00;
-		NEG_WAVE_PORT &= ~(1<<NEG_WAVE_PIN);
-		POS_WAVE_PORT &= ~(1<<POS_WAVE_PIN);
-				
-		if (sineTableIndex >= sizeof(SINE_TABLE))
+		positiveHalfWave = !positiveHalfWave;
+		sineTableIndex = 0;
+		
+		// the deadband on each half bridge is given by the switch of in the sien table
+		// (the 0 at the end)
+		if (positiveHalfWave)
 		{
-			higherHalfWave = !higherHalfWave;
-			sineTableIndex = 0;
-			
-			if (higherHalfWave)
-				POS_WAVE_PORT |= (1<<POS_WAVE_PIN);
-			else
-				NEG_WAVE_PORT |= (1<<NEG_WAVE_PIN);
+			NEG_WAVE_PORT &= ~(1<<NEG_WAVE_PIN);
+			POS_WAVE_PORT |= (1<<POS_WAVE_PIN);
+		}
+		else
+		{
+			POS_WAVE_PORT &= ~(1<<POS_WAVE_PIN);
+			NEG_WAVE_PORT |= (1<<NEG_WAVE_PIN);
 		}
 	}
 	
-	if (higherHalfWave)
+	if (positiveHalfWave)
+	{
 		POS_WAVE_OCR = SINE_TABLE[sineTableIndex];
+		NEG_WAVE_OCR = 0x00;
+	}
 	else
+	{
+		POS_WAVE_OCR = 0x00;
 		NEG_WAVE_OCR = SINE_TABLE[sineTableIndex];
+	}
 }
 
 
@@ -79,61 +83,65 @@ int main(void)
 	DDRE |= (1<<PE2);		// Lower half wave PWM
 	
 	
-	// TODO read if from an jumper or switch
-	const bool generateSineOutput = false;
+	// TODO read it from an jumper or switch
+	const bool generateSineOutput = true;
 	if (generateSineOutput)
 	{
 		// configure timer and pwm for sine wave output
 		TCCR1A = (1<<COM1A1) | (1<<COM1B1) | (1<<WGM10);  // Clear on compare and phase correct 8-bit pwm
 		TCCR1B = (0<<CS12) | (0<<CS11) | (1<<CS10);     //PRE 1
-		TCCR1B = (1<<CS12) | (0<<CS11) | (1<<CS10);     //PRE 1024
 		POS_WAVE_OCR = 0x00;
 		NEG_WAVE_OCR = 0x00;
 		TIMSK  = (1<<TOIE1); // enable overflow interrupt
 
 		sei();
+		
+		while(true)
+		{
+		}
 	}
-	
-	
-	// otherwise generate a trapez
-	// useful to minimize the switching time of the fets (more efficient)
-	//				1	2	
-	// 		NULL	-	-	!PC4	PD5
-	// 		POS		+	-	!PE2	PA0
-	// 		NULL	-	-	!PA0	PE2
-	//		NEG		-	+	!PD5	PC4
-	while (!generateSineOutput)
-	{
-		// TODO check every time if both outputs for the same half bridge are enabled at the same time
-		// than switch off all outputs and stop the system
-		// possible use a led for indecating this error
-		
-		// 	NULL	-	-	!PC4	PD5
-		NEG_WAVE_PORT &= ~(1<<NEG_WAVE_PIN);
-		_delay_us(FET_TIMEOUT);
-		PORTD |= (1<<PD5);		// Positiv half wave PWM
-		_delay_ms(NULL_TIME);
-		
-		
-		// 	POS		+	-	!PE2	PA0
-		PORTE &= ~(1<<PE2);		// Negativ half wave PWM
-		_delay_us(FET_TIMEOUT);
-		POS_WAVE_PORT |= (1<<POS_WAVE_PIN);
-		_delay_ms(PULSE_TIME);
-		
-		
-		// 	NULL	-	-	!PA0	PE2
-		POS_WAVE_PORT &= ~(1<<POS_WAVE_PIN);
-		_delay_us(FET_TIMEOUT);
-		PORTE |= (1<<PE2);		// Negativ half wave PWM
-		_delay_ms(NULL_TIME);
-		
-		
+	else
+	{	
+		// otherwise generate a trapez
+		// useful to minimize the switching time of the fets (more efficient)
+		//				1	2	
+		// 		NULL	-	-	!PC4	PD5
+		// 		POS		+	-	!PE2	PA0
+		// 		NULL	-	-	!PA0	PE2
 		//		NEG		-	+	!PD5	PC4
-		PORTD &= ~(1<<PD5);		// Positiv half wave PWM
-		_delay_us(FET_TIMEOUT);
-		NEG_WAVE_PORT |= (1<<NEG_WAVE_PIN);
-		_delay_ms(PULSE_TIME);
+		while (true)
+		{
+			// TODO check every time if both outputs for the same half bridge are enabled at the same time
+			// than switch off all outputs and stop the system
+			// possible use a led for indecating this error
+			
+			// 	NULL	-	-	!PC4	PD5
+			NEG_WAVE_PORT &= ~(1<<NEG_WAVE_PIN);
+			_delay_us(FET_TIMEOUT);
+			PORTD |= (1<<PD5);		// Positiv half wave PWM
+			_delay_ms(NULL_TIME);
+			
+			
+			// 	POS		+	-	!PE2	PA0
+			PORTE &= ~(1<<PE2);		// Negativ half wave PWM
+			_delay_us(FET_TIMEOUT);
+			POS_WAVE_PORT |= (1<<POS_WAVE_PIN);
+			_delay_ms(PULSE_TIME);
+			
+			
+			// 	NULL	-	-	!PA0	PE2
+			POS_WAVE_PORT &= ~(1<<POS_WAVE_PIN);
+			_delay_us(FET_TIMEOUT);
+			PORTE |= (1<<PE2);		// Negativ half wave PWM
+			_delay_ms(NULL_TIME);
+			
+			
+			//		NEG		-	+	!PD5	PC4
+			PORTD &= ~(1<<PD5);		// Positiv half wave PWM
+			_delay_us(FET_TIMEOUT);
+			NEG_WAVE_PORT |= (1<<NEG_WAVE_PIN);
+			_delay_ms(PULSE_TIME);
+		}
 	}
 	
 	return 0;
