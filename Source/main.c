@@ -1,20 +1,43 @@
 #include <stdint.h>
 #include <stdbool.h>
+
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/wdt.h>
+
 #include <util/delay.h>
 
 
-#define POS_WAVE_DDR				DDRA
-#define POS_WAVE_PORT				PORTA
-#define POS_WAVE_PIN				PA0
+#define BRIDGE1_HIGH_DDR		DDRA
+#define BRIDGE1_HIGH_PORT		PORTA
+#define BRIDGE1_HIGH_IN			PINA
+#define BRIDGE1_HIGH_PIN		PA0
 
-#define NEG_WAVE_DDR				DDRC
-#define NEG_WAVE_PORT				PORTC
-#define NEG_WAVE_PIN				PC4
+#define BRIDGE1_LOW_DDR			DDRE
+#define BRIDGE1_LOW_PORT		PORTE
+#define BRIDGE1_LOW_IN			PINE
+#define BRIDGE1_LOW_PIN			PE2
+#define BRIDGE1_LOW_OCR			OCR1BL
 
-#define POS_WAVE_OCR				OCR1AL
-#define NEG_WAVE_OCR				OCR1BL
+
+#define BRIDGE2_HIGH_DDR		DDRC
+#define BRIDGE2_HIGH_PORT		PORTC
+#define BRIDGE2_HIGH_IN			PINC
+#define BRIDGE2_HIGH_PIN		PC4
+
+#define BRIDGE2_LOW_DDR			DDRD
+#define BRIDGE2_LOW_PORT		PORTD
+#define BRIDGE2_LOW_IN			PIND
+#define BRIDGE2_LOW_PIN			PD5
+#define BRIDGE2_LOW_OCR			OCR1AL
+
+
+#define OUTPUT_SWITCH_PORT		PORTD
+#define OUTPUT_SWITCH_IN		PIND
+#define OUTPUT_SWITCH_PIN		PD7
+
+
+
 
 // The time out between a half bridge (in µs)
 #define FET_TIMEOUT				3
@@ -44,105 +67,175 @@ ISR(TIMER1_OVF_vect)
 		// (the 0 at the end)
 		if (positiveHalfWave)
 		{
-			NEG_WAVE_PORT &= ~(1<<NEG_WAVE_PIN);
-			POS_WAVE_PORT |= (1<<POS_WAVE_PIN);
+			BRIDGE2_HIGH_PORT &= ~(1<<BRIDGE2_HIGH_PIN);
+			BRIDGE1_HIGH_PORT |= (1<<BRIDGE1_HIGH_PIN);
 		}
 		else
 		{
-			POS_WAVE_PORT &= ~(1<<POS_WAVE_PIN);
-			NEG_WAVE_PORT |= (1<<NEG_WAVE_PIN);
+			BRIDGE1_HIGH_PORT &= ~(1<<BRIDGE1_HIGH_PIN);
+			BRIDGE2_HIGH_PORT |= (1<<BRIDGE2_HIGH_PIN);
 		}
 	}
 	
 	if (positiveHalfWave)
 	{
-		POS_WAVE_OCR = SINE_TABLE[sineTableIndex];
-		NEG_WAVE_OCR = 0x00;
+		BRIDGE2_LOW_OCR = SINE_TABLE[sineTableIndex];
+		BRIDGE1_LOW_OCR = 0x00;
 	}
 	else
 	{
-		POS_WAVE_OCR = 0x00;
-		NEG_WAVE_OCR = SINE_TABLE[sineTableIndex];
+		BRIDGE2_LOW_OCR = 0x00;
+		BRIDGE1_LOW_OCR = SINE_TABLE[sineTableIndex];
+	}
+}
+
+
+void switchOutputsOff(void)
+{
+	// open fets which are conected to v+
+	BRIDGE1_HIGH_PORT &= ~(1<<BRIDGE1_HIGH_PIN);
+	BRIDGE2_HIGH_PORT &= ~(1<<BRIDGE2_HIGH_PIN);
+	
+	// clear pwm outputs (open fets which are connected to gnd
+	BRIDGE1_LOW_PORT &= ~(1<<BRIDGE1_LOW_PIN);
+	BRIDGE2_LOW_PORT &= ~(1<<BRIDGE2_LOW_PIN);
+	
+	// disable timer and pwm to get control with the port registers to the output pins
+	TCCR1A = 0x00;
+	TCCR1B = 0x00;
+}
+
+
+void enterSafeMode(void)
+{
+	switchOutputsOff();
+	
+	// switch off watchdog to realy wait for reset
+	wdt_disable();
+	
+	// wait for reset
+	while (true)
+	{
+	}
+}
+
+
+void checkOutputConflicts(void)
+{
+	// switch all outputs off and wait for an avr reset
+	// if both outputs of the same half bridge are active at the same time
+	const uint8_t bridge1HighOut = BRIDGE1_HIGH_IN;
+	const uint8_t bridge1LowOut = BRIDGE1_LOW_IN;
+	if (  (bridge1HighOut & (1<<BRIDGE1_HIGH_PIN)) && (bridge1LowOut & (1<<BRIDGE1_LOW_PIN))  )
+		enterSafeMode();
+	
+	const uint8_t bridge2HighOut = BRIDGE2_HIGH_IN;
+	const uint8_t bridge2LowOut = BRIDGE2_LOW_IN;
+	if (  (bridge2HighOut & (1<<BRIDGE2_HIGH_PIN)) && (bridge2LowOut & (1<<BRIDGE2_LOW_PIN))  )
+		enterSafeMode();
+	
+	// reset watchdog timer
+	wdt_reset();
+}
+
+
+void sineGenerator(void)
+{
+	// configure timer and pwm for sine wave output
+	BRIDGE2_LOW_OCR = 0x00;
+	BRIDGE1_LOW_OCR = 0x00;
+	TCCR1A = (1<<COM1A1) | (1<<COM1B1) | (1<<WGM10);  // Clear on compare and phase correct 8-bit pwm
+	TCCR1B = (0<<CS12) | (0<<CS11) | (1<<CS10);     //PRE 1
+	TIMSK  = (1<<TOIE1); // enable overflow interrupt
+	
+	sei();
+	
+	DDRB = 0xFF;
+	
+	while(true)
+	{
+		checkOutputConflicts();
+	}
+}
+
+
+void trapezeGenerator(void)
+{	
+	// otherwise generate a trapez
+	// useful to minimize the switching time of the fets (more efficient)
+	//				1	2	
+	// 		NULL	-	-	!PC4	PD5
+	// 		POS		+	-	!PE2	PA0
+	// 		NULL	-	-	!PA0	PE2
+	//		NEG		-	+	!PD5	PC4
+	while (true)
+	{
+		// 	NULL	-	-	!PC4	PD5
+		BRIDGE2_HIGH_PORT &= ~(1<<BRIDGE2_HIGH_PIN);
+		_delay_us(FET_TIMEOUT);
+		BRIDGE2_LOW_PORT |= (1<<BRIDGE2_LOW_PIN);		// Positiv half wave PWM
+		
+		checkOutputConflicts();
+		_delay_ms(NULL_TIME);
+		checkOutputConflicts();
+		
+		
+		// 	POS		+	-	!PE2	PA0
+		BRIDGE1_LOW_PORT &= ~(1<<BRIDGE1_LOW_PIN);		// Negativ half wave PWM
+		_delay_us(FET_TIMEOUT);
+		BRIDGE1_HIGH_PORT |= (1<<BRIDGE1_HIGH_PIN);
+		
+		checkOutputConflicts();
+		_delay_ms(PULSE_TIME);
+		checkOutputConflicts();
+		
+		
+		// 	NULL	-	-	!PA0	PE2
+		BRIDGE1_HIGH_PORT &= ~(1<<BRIDGE1_HIGH_PIN);
+		_delay_us(FET_TIMEOUT);
+		BRIDGE1_LOW_PORT |= (1<<BRIDGE1_LOW_PIN);		// Negativ half wave PWM
+		
+		checkOutputConflicts();
+		_delay_ms(NULL_TIME);
+		checkOutputConflicts();
+		
+		
+		//		NEG		-	+	!PD5	PC4
+		BRIDGE2_LOW_PORT &= ~(1<<BRIDGE2_LOW_PIN);		// Positiv half wave PWM
+		_delay_us(FET_TIMEOUT);
+		BRIDGE2_HIGH_PORT |= (1<<BRIDGE2_HIGH_PIN);
+		
+		checkOutputConflicts();
+		_delay_ms(PULSE_TIME);
+		checkOutputConflicts();
 	}
 }
 
 
 int main(void)
 {
-	// open fets whcih are conected to v+
-	POS_WAVE_PORT &= ~(1<<POS_WAVE_PIN);
-	NEG_WAVE_PORT &= ~(1<<NEG_WAVE_PIN);
-	POS_WAVE_DDR |= (1<<POS_WAVE_PIN);
-	NEG_WAVE_DDR |= (1<<NEG_WAVE_PIN);
+	switchOutputsOff();
 	
-	// clear pwm outputs (open fets which are connected to gnd
-	PORTD &= ~(1<<PD5);
-	PORTE &= ~(1<<PE2);
+	// enable pull up for output switch input
+	OUTPUT_SWITCH_PORT |= (1<<OUTPUT_SWITCH_PIN);
+	
+	BRIDGE1_HIGH_DDR |= (1<<BRIDGE1_HIGH_PIN);
+	BRIDGE2_HIGH_DDR |= (1<<BRIDGE2_HIGH_PIN);
+	
 	// enable PWM outputs
 	DDRD |= (1<<PD5);		// Higher half wave PWM
 	DDRE |= (1<<PE2);		// Lower half wave PWM
 	
+	// enable watchdog timer
+	wdt_enable(WDTO_15MS);
 	
-	// TODO read it from an jumper or switch
-	const bool generateSineOutput = true;
+	
+	// read output configuration from an jumper or switch
+	const bool generateSineOutput = (OUTPUT_SWITCH_IN & (1<<OUTPUT_SWITCH_PIN));
 	if (generateSineOutput)
-	{
-		// configure timer and pwm for sine wave output
-		TCCR1A = (1<<COM1A1) | (1<<COM1B1) | (1<<WGM10);  // Clear on compare and phase correct 8-bit pwm
-		TCCR1B = (0<<CS12) | (0<<CS11) | (1<<CS10);     //PRE 1
-		POS_WAVE_OCR = 0x00;
-		NEG_WAVE_OCR = 0x00;
-		TIMSK  = (1<<TOIE1); // enable overflow interrupt
-
-		sei();
-		
-		while(true)
-		{
-		}
-	}
+		sineGenerator();
 	else
-	{	
-		// otherwise generate a trapez
-		// useful to minimize the switching time of the fets (more efficient)
-		//				1	2	
-		// 		NULL	-	-	!PC4	PD5
-		// 		POS		+	-	!PE2	PA0
-		// 		NULL	-	-	!PA0	PE2
-		//		NEG		-	+	!PD5	PC4
-		while (true)
-		{
-			// TODO check every time if both outputs for the same half bridge are enabled at the same time
-			// than switch off all outputs and stop the system
-			// possible use a led for indecating this error
-			
-			// 	NULL	-	-	!PC4	PD5
-			NEG_WAVE_PORT &= ~(1<<NEG_WAVE_PIN);
-			_delay_us(FET_TIMEOUT);
-			PORTD |= (1<<PD5);		// Positiv half wave PWM
-			_delay_ms(NULL_TIME);
-			
-			
-			// 	POS		+	-	!PE2	PA0
-			PORTE &= ~(1<<PE2);		// Negativ half wave PWM
-			_delay_us(FET_TIMEOUT);
-			POS_WAVE_PORT |= (1<<POS_WAVE_PIN);
-			_delay_ms(PULSE_TIME);
-			
-			
-			// 	NULL	-	-	!PA0	PE2
-			POS_WAVE_PORT &= ~(1<<POS_WAVE_PIN);
-			_delay_us(FET_TIMEOUT);
-			PORTE |= (1<<PE2);		// Negativ half wave PWM
-			_delay_ms(NULL_TIME);
-			
-			
-			//		NEG		-	+	!PD5	PC4
-			PORTD &= ~(1<<PD5);		// Positiv half wave PWM
-			_delay_us(FET_TIMEOUT);
-			NEG_WAVE_PORT |= (1<<NEG_WAVE_PIN);
-			_delay_ms(PULSE_TIME);
-		}
-	}
+		trapezeGenerator();
 	
 	return 0;
 }
